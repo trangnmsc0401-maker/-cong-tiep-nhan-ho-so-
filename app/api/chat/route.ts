@@ -1,12 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { chatbotSystemInstruction } from "@/lib/chatbot-faq";
+import { appendMessage, getConversationMessages, getOrCreateConversationId } from "@/lib/chat-store";
 
 export const dynamic = "force-dynamic";
-
-interface ChatMessage {
-  from: "bot" | "user";
-  text: string;
-}
 
 const MODEL = "gemini-3.5-flash-lite";
 const MAX_HISTORY_MESSAGES = 20;
@@ -20,7 +16,7 @@ export async function POST(request: Request) {
     );
   }
 
-  let body: { message?: string; history?: ChatMessage[] };
+  let body: { message?: string };
   try {
     body = await request.json();
   } catch {
@@ -32,15 +28,24 @@ export async function POST(request: Request) {
     return Response.json({ error: "Thiếu nội dung câu hỏi." }, { status: 400 });
   }
 
-  const history = Array.isArray(body.history) ? body.history.slice(-MAX_HISTORY_MESSAGES) : [];
+  let conversationId: string;
+  let history: Awaited<ReturnType<typeof getConversationMessages>>;
+  try {
+    conversationId = await getOrCreateConversationId();
+    await appendMessage(conversationId, "user", message);
+    history = await getConversationMessages(conversationId);
+  } catch (error) {
+    console.error("Chat store error:", error);
+    return Response.json(
+      { error: "Không lưu được hội thoại, bạn thử lại sau nhé." },
+      { status: 502 },
+    );
+  }
 
-  const contents = [
-    ...history.map((m) => ({
-      role: m.from === "user" ? ("user" as const) : ("model" as const),
-      parts: [{ text: m.text }],
-    })),
-    { role: "user" as const, parts: [{ text: message }] },
-  ];
+  const contents = history.slice(-MAX_HISTORY_MESSAGES).map((m) => ({
+    role: m.from === "user" ? ("user" as const) : ("model" as const),
+    parts: [{ text: m.text }],
+  }));
 
   try {
     const ai = new GoogleGenAI({ apiKey });
@@ -59,6 +64,8 @@ export async function POST(request: Request) {
         { status: 502 },
       );
     }
+
+    await appendMessage(conversationId, "bot", reply);
 
     return Response.json({ reply });
   } catch (error) {
